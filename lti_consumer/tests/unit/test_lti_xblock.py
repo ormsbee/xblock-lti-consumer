@@ -5,6 +5,7 @@ Unit tests for LtiConsumerXBlock
 import json
 import logging
 from datetime import timedelta
+from itertools import product
 from unittest.mock import Mock, PropertyMock, patch
 
 import ddt
@@ -18,7 +19,7 @@ from jwkest.jwk import RSAKey, KEYS
 from lti_consumer.api import get_lti_1p3_launch_info
 from lti_consumer.exceptions import LtiError
 from lti_consumer.lti_1p3.tests.utils import create_jwt
-from lti_consumer.lti_xblock import LtiConsumerXBlock, parse_handler_suffix
+from lti_consumer.lti_xblock import LtiConsumerXBlock, parse_handler_suffix, config_type_values_provider
 from lti_consumer.tests.unit import test_utils
 from lti_consumer.tests.unit.test_utils import FAKE_USER_ID, make_jwt_request, make_request, make_xblock
 from lti_consumer.utils import resolve_custom_parameter_template
@@ -410,6 +411,7 @@ class TestProperties(TestLtiConsumerXBlock):
             self.assertTrue(mock_timezone_now.called)
 
 
+@ddt.ddt
 class TestEditableFields(TestLtiConsumerXBlock):
     """
     Unit tests for LtiConsumerXBlock.editable_fields
@@ -417,11 +419,14 @@ class TestEditableFields(TestLtiConsumerXBlock):
 
     def setUp(self):
         super().setUp()
-        self.waffle_patch = patch('lti_consumer.lti_xblock.external_config_filter_enabled')
-        self.mock_flag = self.waffle_patch.start()
+        self.mock_filter_enabled_patcher = patch("lti_consumer.lti_xblock.external_config_filter_enabled")
+        self.mock_database_config_enabled_patcher = patch("lti_consumer.lti_xblock.database_config_enabled")
+        self.mock_filter_enabled = self.mock_filter_enabled_patcher.start()
+        self.mock_database_config_enabled = self.mock_database_config_enabled_patcher.start()
 
     def tearDown(self):
-        self.waffle_patch.stop()
+        self.mock_filter_enabled_patcher.stop()
+        self.mock_database_config_enabled_patcher.stop()
         super().tearDown()
 
     def get_mock_lti_configuration(self, editable):
@@ -501,11 +506,51 @@ class TestEditableFields(TestLtiConsumerXBlock):
         """
         Test that the external configuration fields are editable only when the waffle flag is set.
         """
-        self.mock_flag.return_value = True
+        self.mock_filter_enabled.return_value = True
         self.assertTrue(self.are_fields_editable(fields=['config_type', 'external_config']))
 
-        self.mock_flag.return_value = False
+        self.mock_filter_enabled.return_value = False
         self.assertFalse(self.are_fields_editable(fields=['config_type', 'external_config']))
+
+    def test_database_config_fields_are_editable_only_when_waffle_flag_is_set(self):
+        """
+        Test that the database configuration fields are editable only when the waffle flag is set.
+        """
+        self.mock_database_config_enabled.return_value = True
+        self.assertTrue(self.are_fields_editable(fields=['config_type']))
+
+        self.mock_filter_enabled.return_value = False
+        self.assertFalse(self.are_fields_editable(fields=['config_type', 'external_config']))
+
+    def test_database_editable_config_1p3_fields(self):
+        self.xblock.lti_version = 'lti_1p3'
+        self.xblock.config_type = 'database'
+
+        self.assertFalse(self.are_fields_editable(
+            fields=['lti_1p3_launch_url', 'lti_1p3_oidc_url', 'lti_1p3_tool_key_mode',
+                    'lti_1p3_tool_keyset_url', 'lti_1p3_tool_public_key'])
+        )
+
+    @ddt.idata(product([True, False], [True, False]))
+    @ddt.unpack
+    def test_config_type_values(self, filter_enabled, database_config_enabled):
+        """
+        Test that only the appropriate values for config_type are available as options, depending on the state of the
+        appropriate waffle flags.
+        """
+        self.mock_filter_enabled.return_value = filter_enabled
+        self.mock_database_config_enabled.return_value = database_config_enabled
+
+        values = config_type_values_provider(self.xblock)
+
+        expected_values = ["new"]
+        if self.mock_filter_enabled:
+            expected_values.append('external')
+        if self.mock_database_config_enabled:
+            expected_values.append('database')
+
+        for value in values:
+            self.assertIn(value['value'], expected_values)
 
 
 class TestGetLti1p1Consumer(TestLtiConsumerXBlock):
@@ -1212,6 +1257,41 @@ class TestGetContext(TestLtiConsumerXBlock):
 
         self.assertIn('<img src="example.com/image.jpeg">', context['comment'])
 
+    @ddt.data('external', 'database')
+    def test_context_correct_origin_1p1(self, config_type):
+        """
+        Test that certain context keys relevant to 1.1 integrations that can be stored on different types of
+        config_stores are pulled from the appropriate config_store.
+        """
+        self.xblock.config_type = config_type
+
+        lti_launch_url = 'www.example.org'
+        mock_lti_consumer = Mock()
+        type(mock_lti_consumer).lti_launch_url = PropertyMock(return_value=lti_launch_url)
+        self.xblock._get_lti_consumer = Mock(return_value=mock_lti_consumer)  # pylint: disable=protected-access
+
+        context = self.xblock._get_context_for_template()  # pylint: disable=protected-access
+        self.assertEqual(context['launch_url'], lti_launch_url)
+
+    @patch('lti_consumer.api.get_lti_1p3_content_url')
+    def test_context_correct_origin_1p3(self, mock_get_lti_1p3_content_url):
+        """
+        Test that certain context keys relevant to 1.3 integrations that can be stored on different types of
+        config_stores are pulled from the appropriate config_store.
+        """
+        self.xblock.lti_version = 'lti_1p3'
+        self.xblock.config_type = 'database'
+        self.xblock.lti_1p3_launch_url = 'www.example.com'
+        mock_get_lti_1p3_content_url.return_value = 'lti_1p3_content_url'
+
+        lti_1p3_launch_url = 'www.example.org'
+        mock_lti_consumer = Mock()
+        type(mock_lti_consumer).launch_url = PropertyMock(return_value=lti_1p3_launch_url)
+        self.xblock._get_lti_consumer = Mock(return_value=mock_lti_consumer)  # pylint: disable=protected-access
+
+        context = self.xblock._get_context_for_template()  # pylint: disable=protected-access
+        self.assertEqual(context['lti_1p3_launch_url'], lti_1p3_launch_url)
+
 
 @ddt.ddt
 class TestProcessorSettings(TestLtiConsumerXBlock):
@@ -1294,11 +1374,14 @@ class TestLtiConsumer1p3XBlock(TestCase):
         # Set dummy location so that UsageKey lookup is valid
         self.xblock.location = 'block-v1:course+test+2020+type@problem+block@test'
 
-        self.patcher = patch("lti_consumer.lti_xblock.external_config_filter_enabled")
-        self.mock_filter_enabled = self.patcher.start()
+        self.mock_filter_enabled_patcher = patch("lti_consumer.lti_xblock.external_config_filter_enabled")
+        self.mock_database_config_enabled_patcher = patch("lti_consumer.lti_xblock.database_config_enabled")
+        self.mock_filter_enabled = self.mock_filter_enabled_patcher.start()
+        self.mock_database_config_enabled = self.mock_database_config_enabled_patcher.start()
 
     def tearDown(self) -> None:
-        self.patcher.stop()
+        self.mock_filter_enabled_patcher.stop()
+        self.mock_database_config_enabled_patcher.stop()
         super().tearDown()
 
     def test_launch_callback_endpoint(self):
@@ -1325,7 +1408,6 @@ class TestLtiConsumer1p3XBlock(TestCase):
             "nonce=nonce&" +
             "login_hint=oidchint"
         )
-
         response = self.xblock.lti_1p3_launch_callback(request)
 
         # Check response and assert that state was inserted

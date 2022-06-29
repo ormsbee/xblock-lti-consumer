@@ -14,7 +14,6 @@ from edx_django_utils.cache import RequestCache
 from jwkest.jwk import RSAKey
 from opaque_keys.edx.locator import CourseLocator
 
-from lti_consumer.lti_1p1.consumer import LtiConsumer1p1
 from lti_consumer.lti_xblock import LtiConsumerXBlock
 from lti_consumer.models import (
     CourseAllowPIISharingInLTIFlag,
@@ -62,13 +61,6 @@ class TestLtiConfigurationModel(TestCase):
             location=str(self.xblock.location),
             version=LtiConfiguration.LTI_1P1
         )
-        self.lti_1p1_config_db = LtiConfiguration.objects.create(
-            version=LtiConfiguration.LTI_1P1,
-            config_store=LtiConfiguration.CONFIG_ON_DB,
-            lti_1p1_launch_url='http://tool.example/lti1.1launch',
-            lti_1p1_client_key='test_1p1p_key',
-            lti_1p1_client_secret='test_1p1p_secret',
-        )
 
         self.lti_1p3_config = LtiConfiguration.objects.create(
             location=str(self.xblock.location),
@@ -110,21 +102,6 @@ class TestLtiConfigurationModel(TestCase):
         self.assertEqual(self.lti_1p1_external.get_lti_consumer(), "consumer")
         mock_consumer.assert_called_once_with("https://example.com", "client_key", "secret")
 
-    def test_xblock_store_lti1p1(self):
-        """
-        Check if the correct LTI consumer is returned.
-        """
-        lti_consumer = self.lti_1p1_config_db.get_lti_consumer()
-
-        self.assertIsInstance(lti_consumer, LtiConsumer1p1)
-
-        lti_1p3_config = LtiConfiguration.objects.create(
-            version=LtiConfiguration.LTI_1P3,
-            config_store=LtiConfiguration.CONFIG_ON_DB,
-        )
-        with self.assertRaises(NotImplementedError):
-            lti_1p3_config.get_lti_consumer()
-
     def test_repr(self):
         """
         Test String representation of model.
@@ -160,7 +137,7 @@ class TestLtiConfigurationModel(TestCase):
                         'https://purl.imsglobal.org/spec/lti-ags/scope/result.readonly',
                         'https://purl.imsglobal.org/spec/lti-ags/scope/score',
                     ],
-                    'lineitems': 'https://example.com/api/lti_consumer/v1/lti/3/lti-ags',
+                    'lineitems': 'https://example.com/api/lti_consumer/v1/lti/2/lti-ags',
                 }
             }
         )
@@ -267,6 +244,17 @@ class TestLtiConfigurationModel(TestCase):
         regenerated_public_key = lti_config.lti_1p3_public_jwk
         lti_config.refresh_from_db()
         self.assertEqual(regenerated_public_key, public_key)
+
+    def test_clean(self):
+        self.lti_1p3_config.config_store = self.lti_1p3_config.CONFIG_ON_XBLOCK
+        self.lti_1p3_config.location = None
+
+        with self.assertRaises(ValidationError):
+            self.lti_1p3_config.clean()
+
+        self.lti_1p3_config.config_store = self.lti_1p3_config.CONFIG_ON_DB
+        with self.assertRaises(ValidationError):
+            self.lti_1p3_config.clean()
 
 
 class TestLtiAgsLineItemModel(TestCase):

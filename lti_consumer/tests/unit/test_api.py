@@ -2,6 +2,7 @@
 Tests for LTI API.
 """
 from unittest.mock import Mock, patch
+import ddt
 
 from Cryptodome.PublicKey import RSA
 from django.test.testcases import TestCase
@@ -59,6 +60,7 @@ class Lti1P3TestCase(TestCase):
         )
 
 
+@ddt.ddt
 class TestGetOrCreateLocalLtiConfiguration(TestCase):
     """
     Unit tests for _get_or_create_local_lti_config API method.
@@ -125,6 +127,51 @@ class TestGetOrCreateLocalLtiConfiguration(TestCase):
         # Check if the object was created
         lti_config.refresh_from_db()
         self.assertEqual(lti_config.version, LtiConfiguration.LTI_1P3)
+
+    def test_not_update_lti_version(self):
+        """
+        Check if the API retrieves the config and does not update the API version if the LTIConfiguration
+        config_type is CONFIG_ON_DB. This is because the LTIConfiguration model is the source of truth for this
+        config_type.
+        """
+        location = 'block-v1:course+test+2020+type@problem+block@test'
+
+        lti_config = LtiConfiguration.objects.create(
+            location=location,
+            version=LtiConfiguration.LTI_1P1,
+            config_store=LtiConfiguration.CONFIG_ON_DB
+        )
+
+        # Call API
+        _get_or_create_local_lti_config(
+            lti_version=LtiConfiguration.LTI_1P3,
+            block_location=location
+        )
+
+        # Check if the object was created
+        lti_config.refresh_from_db()
+        self.assertNotEqual(lti_config.version, LtiConfiguration.LTI_1P3)
+
+    @ddt.unpack
+    @ddt.data(
+        {'type_slug': 'new', 'config_type': LtiConfiguration.CONFIG_ON_XBLOCK},
+        {'type_slug': 'external', 'config_type': LtiConfiguration.CONFIG_EXTERNAL},
+        {'type_slug': 'database', 'config_type': LtiConfiguration.CONFIG_ON_DB},
+    )
+    def test_create_lti_config_config_store(self, type_slug, config_type):
+        """
+        Check if the type parameter to _get_or_create_local_lti_config is used to change
+        the config_type field of the LtiConfiguration model appropriately.
+        """
+        location = 'block-v1:course+test+2020+type@problem+block@test'
+        lti_version = LtiConfiguration.LTI_1P3
+        lti_config = _get_or_create_local_lti_config(
+            lti_version=lti_version,
+            block_location=location,
+            config_type=type_slug,
+        )
+
+        self.assertEqual(lti_config.config_store, config_type)
 
     def test_create_model_instance_with_external_id(self):
         """

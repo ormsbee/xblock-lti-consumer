@@ -23,6 +23,16 @@ function LtiConsumerXBlockInitStudio(runtime, element) {
         "lti_1p3_enable_nrps"
     ];
 
+    // TODO: This variable is temporary. It describes the LTI 1.3 fields that have been added to the LTIConfiguration
+    // model and that should not be displayed when the configType is "database".
+    const lti1P3FieldMigratedList = [
+        "lti_1p3_launch_url",
+        "lti_1p3_oidc_url",
+        "lti_1p3_tool_key_mode",
+        "lti_1p3_tool_keyset_url",
+        "lti_1p3_tool_public_key"
+    ]
+
     /**
      * Query a field using the `data-field-name` attribute and hide/show it.
      *
@@ -78,6 +88,7 @@ function LtiConsumerXBlockInitStudio(runtime, element) {
      * Only display the field appropriate for the selected key mode.
      */
     function toggleLtiToolKeyMode() {
+        debugger;
         const ltiKeyModeField = $(element).find('#xb-field-edit-lti_1p3_tool_key_mode');
 
         // find the field containers
@@ -98,14 +109,25 @@ function LtiConsumerXBlockInitStudio(runtime, element) {
      * Toggle visibility of LTI configuration fields based on the config type
      *
      *  new - Show all the LTI 1.1/1.3 config fields
+     *  database - Do not show the LTI 1.1/1.3 config fields
      *  external - Show only the External Config ID field
      */
     function toggleLtiConfigType() {
         const configType = $(element).find('#xb-field-edit-config_type').val();
-        const configFields = lti1P1FieldList.concat(lti1P3FieldList, ['lti_version']);
 
+        let lti1P3Fields
         if (configType === "external") {
-            // hide the lti_verison and all the LTI 1.1 and LTI 1.3 fields
+            lti1P3Fields = lti1P3FieldList
+        } else if (configType === "database") {
+            lti1P3Fields = lti1P3FieldMigratedList
+        } else {
+            lti1P3Fields = []
+        }
+
+        const configFields = lti1P1FieldList.concat(lti1P3Fields, ['lti_version']);
+
+        if ((configType === "external") || (configType === "database")) {
+            // hide the lti_version and all the LTI 1.1 and LTI 1.3 fields
             configFields.forEach(function (field) {
                 toggleFieldVisibility(field, false);
             })

@@ -20,10 +20,13 @@ from .utils import (
 from .filters import get_external_config_from_filter
 
 
-def _get_or_create_local_lti_config(lti_version, block_location, external_id=None):
+def _get_or_create_local_lti_config(lti_version, block_location, external_id=None, config_type="new"):
     """
     Retrieves the id of the LTI Configuration for the
     block and location, or creates one if it doesn't exist.
+
+    The optional config_type parameter represents the type of the config that should be created if a config identified
+    by block_location does not exist. It is one of "new", "database", or "external". It defaults to "new".
 
     Doesn't take into account the LTI version of the cofiguration,
     and updates it accordingly.
@@ -34,15 +37,26 @@ def _get_or_create_local_lti_config(lti_version, block_location, external_id=Non
     # The create operation is only performed when there is no existing configuration for the block
     lti_config, _ = LtiConfiguration.objects.get_or_create(location=block_location)
 
-    if lti_config.version != lti_version:
+    # If the LTI configuration version on the model does not match what is on the configuration used by the integration
+    # (i.e xBlock, database, or external configuration), then update the model to match. This may occur if the LTI
+    # configuration is stored on the xBlock (i.e. "new"), and the xBlock field has changed since the LTI Configuration
+    # was last accessed.
+    # If the LTI configuration is stored on the LTI configuration model (i.e. "database"), then the lti_version function
+    # parameter can be ignored. There's no need to update the version on the model, because the model is the source of
+    # truth for itself.
+    if (lti_config.version != lti_version and lti_config.config_store != LtiConfiguration.CONFIG_ON_DB):
         lti_config.version = lti_version
 
-    if external_id:
-        lti_config.config_store = LtiConfiguration.CONFIG_EXTERNAL
-        lti_config.external_id = external_id
+    config_store = None
+    if config_type == "external" or external_id is not None:
+        config_store = LtiConfiguration.CONFIG_EXTERNAL
+    elif config_type == "database":
+        config_store = LtiConfiguration.CONFIG_ON_DB
     else:
-        lti_config.config_store = LtiConfiguration.CONFIG_ON_XBLOCK
-        lti_config.external_id = None
+        config_store = LtiConfiguration.CONFIG_ON_XBLOCK
+
+    lti_config.config_store = config_store
+    lti_config.external_id = external_id
 
     lti_config.save()
     # Return configuration ID
@@ -67,12 +81,25 @@ def _get_lti_config(config_id=None, block=None):
             lti_config = _get_or_create_local_lti_config(
                 config.get("version"),
                 block.location,
-                block.external_config
+                external_id=block.external_config,
+                config_type="external"
+            )
+        elif block.config_type == "database":
+            lti_config = _get_or_create_local_lti_config(
+                # TODO: I'm not satisfied with this. I want the version to come from the LTIConfiguration model, not
+                # the xBlock. However, it gets messy to find the LTIConfiguration here when it's already being done in
+                # _get_or_create_local_lti_config and to specify a default if it doesn't exist. I'd rather the default
+                # be handled by the model itself. I'm passing None here and letting the _get_or_create_local_lti_config
+                # case handle the database case. I could make lti_version an optional parameter, alternatively.
+                None,
+                block.location,
+                config_type="database"
             )
         else:
             lti_config = _get_or_create_local_lti_config(
                 block.lti_version,
                 block.location,
+                config_type="new"
             )
         # Since the block was passed, preload it to avoid
         # having to instance the modulestore and fetch it again.

@@ -2,7 +2,7 @@
 Utility functions used within unit tests
 """
 
-from unittest.mock import Mock
+from unittest.mock import Mock, PropertyMock
 import urllib
 from webob import Request
 from workbench.runtime import WorkbenchRuntime
@@ -25,6 +25,10 @@ def make_xblock(xblock_name, xblock_cls, attributes):
     xblock.location = Mock(
         html_id=Mock(return_value='sample_element_id'),
     )
+
+    course_key_mock = PropertyMock(return_value='course-v1:edX+DemoX+Demo_Course')
+    type(xblock.location).course_key = course_key_mock
+
     xblock.runtime = Mock(
         hostname='localhost',
     )

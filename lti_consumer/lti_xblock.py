@@ -83,7 +83,7 @@ from .lti_1p3.exceptions import (
 from .lti_1p3.constants import LTI_1P3_CONTEXT_TYPE
 from .outcomes import OutcomeService
 from .track import track_event
-from .utils import _, resolve_custom_parameter_template, external_config_filter_enabled
+from .utils import _, resolve_custom_parameter_template, external_config_filter_enabled, database_config_enabled
 
 
 log = logging.getLogger(__name__)
@@ -129,6 +129,26 @@ def parse_handler_suffix(suffix):
     msg = _("No valid user id found in endpoint URL")
     log.info("[LTI]: %s", msg)
     raise LtiError(msg)
+
+
+def config_type_values_provider(block):
+    """
+    Return a list of possible values for the config_type xBlock field.
+
+    Always return "new" as a config_type value. Determine whether the "database" and "external" config_type values are
+    valid value options, depending on the state of the appropriate toggle.
+    """
+    values = [
+        {"display_name": _("Configuration on block"), "value": "new"}
+    ]
+
+    if database_config_enabled(block.location.course_key):
+        values.append({"display_name": _("Database Configuration"), "value": "database"})
+
+    if external_config_filter_enabled(block.location.course_key):
+        values.append({"display_name": _("Reusable Configuration"), "value": "external"})
+
+    return values
 
 
 LaunchTargetOption = namedtuple('LaunchTargetOption', ['display_name', 'value'])
@@ -253,10 +273,7 @@ class LtiConsumerXBlock(StudioEditableXBlockMixin, XBlock):
     config_type = String(
         display_name=_("Configuration Type"),
         scope=Scope.settings,
-        values=[
-            {"display_name": _("Configuration on block"), "value": "new"},
-            {"display_name": _("Reusable Configuration"), "value": "external"},
-        ],
+        values_provider=config_type_values_provider,
         default="new",
         help=_(
             "Select 'Configuration on block' to configure a new LTI Tool. "
@@ -661,19 +678,33 @@ class LtiConsumerXBlock(StudioEditableXBlockMixin, XBlock):
     @property
     def editable_fields(self):
         """
-        Returns editable fields which may/may not contain 'ask_to_send_username' and
-        'ask_to_send_email' fields depending on the configuration service.
+        Return a list of editable fields that should be editable by the user. Any xBlock fields not included in the
+        returned list are not available or visible to the user to be edited.
+
+        Fields that are potentially filtered out include "config_type", "external_config", "ask_to_send_username", and
+        "ask_to_send_email".
         """
         editable_fields = self.editable_field_names
+        noneditable_fields = []
 
-        # If the support for external configuration is not enabled for the course
-        # then let's remove the external config related fields from edit form
-        if not external_config_filter_enabled(self.location.course_key):  # pylint: disable=no-member
-            editable_fields = tuple(
-                field
-                for field in editable_fields
-                if field not in ['config_type', 'external_config']
+        is_database_config_enabled = database_config_enabled(self.location.course_key)  # pylint: disable=no-member
+        is_external_config_filter_enabled = external_config_filter_enabled(self.location.course_key)  # pylint: disable=no-member
+
+        # If neither additional config_types are enabled, do not display the "config_type" field to users, as "new" is
+        # the only option and does not make sense without other options.
+        if not is_database_config_enabled and not is_external_config_filter_enabled:
+            noneditable_fields.append('config_type')
+
+        # If the enable_external_config_filter is not enabled, do not display the "external_config" field to users.
+        if not is_external_config_filter_enabled:
+            noneditable_fields.append('external_config')
+
+        if self.lti_version == 'lti_1p3' and self.config_type == 'database':
+            noneditable_fields.extend(
+                ['lti_1p3_launch_url', 'lti_1p3_oidc_url', 'lti_1p3_tool_key_mode',
+                 'lti_1p3_tool_keyset_url', 'lti_1p3_tool_public_key']
             )
+
         # update the editable fields if this XBlock is configured to not to allow the
         # editing of 'ask_to_send_username' and 'ask_to_send_email'.
         config_service = self.runtime.service(self, 'lti-configuration')
@@ -683,11 +714,13 @@ class LtiConsumerXBlock(StudioEditableXBlockMixin, XBlock):
                     self.course_id,
                     is_already_sharing_learner_info,
             ):
-                editable_fields = tuple(
-                    field
-                    for field in editable_fields
-                    if field not in ('ask_to_send_username', 'ask_to_send_email')
-                )
+                noneditable_fields.extend(['ask_to_send_username', 'ask_to_send_email'])
+
+        editable_fields = tuple(
+            field
+            for field in editable_fields
+            if field not in noneditable_fields
+        )
 
         return editable_fields
 
@@ -1120,6 +1153,10 @@ class LtiConsumerXBlock(StudioEditableXBlockMixin, XBlock):
         Returns:
             webob.response: HTML LTI launch form or error page if misconfigured
         """
+        # TODO: I need to use the LTIConfiguration model for the version value here, but the consumer model
+        # doesn't have a version attribute, and I don't want to directly reference the model. It seems superfluous to
+        # add a version attribute to a class named "LtiConsumer1p3", but, otherwise, I need to use the name of the
+        # lti_consumer to determine the version (e.g. type(consumer).__name__ == "LtiConsumer1p3" ...).
         if self.lti_version != "lti_1p3":
             return Response(status=404)
 
@@ -1162,7 +1199,10 @@ class LtiConsumerXBlock(StudioEditableXBlockMixin, XBlock):
             lti_message_hint = preflight_response.get('lti_message_hint', '')
 
             # Set LTI Launch URL
-            context.update({'launch_url': self.lti_1p3_launch_url})
+            launch_url = self.lti_1p3_launch_url
+            if self.config_type == 'database':
+                launch_url = lti_consumer.launch_url
+            context.update({'launch_url': launch_url})
 
             # Modify LTI Launch URL dependind on launch type
             # Deep Linking Launch - Configuration flow launched by
@@ -1506,17 +1546,23 @@ class LtiConsumerXBlock(StudioEditableXBlockMixin, XBlock):
         Returns:
             dict: Context variables for templates
         """
-
         # For more context on ALLOWED_TAGS and ALLOWED_ATTRIBUTES
         # Look into this documentation URL see https://bleach.readthedocs.io/en/latest/clean.html#allowed-tags-tags
         # This lets all plaintext through.
         allowed_tags = bleach.sanitizer.ALLOWED_TAGS + ['img']
         allowed_attributes = dict(bleach.sanitizer.ALLOWED_ATTRIBUTES, **{'img': ['src', 'alt']})
         sanitized_comment = bleach.clean(self.score_comment, tags=allowed_tags, attributes=allowed_attributes)
-        launch_url = self.launch_url
 
-        if self.config_type == "external":
-            launch_url = self._get_lti_consumer().lti_launch_url
+        launch_url = self.launch_url
+        lti_1p3_launch_url = self.lti_1p3_launch_url.strip()
+
+        lti_consumer = None
+        if self.config_type in ("external", "database"):
+            lti_consumer = self._get_lti_consumer()
+
+        # The lti_launch_url property only exists on the LtiConsumer1p1.
+        if self.config_type == "external" or (self.config_type == "database" and self.lti_version == "lti_1p1"):
+            launch_url = lti_consumer.lti_launch_url
 
         # As we currently support only LTI 1.1 for external configuration, let's simply
         # use the same logic as the LTI 1.1 for getting the launch handler.
@@ -1535,9 +1581,13 @@ class LtiConsumerXBlock(StudioEditableXBlockMixin, XBlock):
                 hint=str(self.location)  # pylint: disable=no-member
             )
 
+            if self.config_type == 'database':
+                # If we're using database configuration, use the value from the database, not the xBlock.
+                lti_1p3_launch_url = lti_consumer.launch_url
+
         return {
             'launch_url': launch_url.strip(),
-            'lti_1p3_launch_url': self.lti_1p3_launch_url.strip(),
+            'lti_1p3_launch_url': lti_1p3_launch_url,
             'element_id': self.location.html_id(),  # pylint: disable=no-member
             'element_class': self.category,
             'launch_target': self.launch_target,

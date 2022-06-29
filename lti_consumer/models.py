@@ -150,6 +150,34 @@ class LtiConfiguration(models.Model):
         help_text=_("Client ID used by LTI tool"),
     )
 
+    lti_1p3_oidc_url = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text='This is the OIDC third-party initiated login endpoint URL in the LTI 1.3 flow, '
+                  'which should be provided by the LTI Tool.'
+    )
+
+    lti_1p3_launch_url = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text='This is the LTI launch URL, otherwise known as the target_link_uri.'
+                  'It represents the LTI resource to launch to or load in the second leg of the launch flow, '
+                  'when the resource is actually launched or loaded.'
+    )
+
+    lti_1p3_tool_public_key = models.TextField(
+        blank=True,
+        help_text='This is the Tool\'s public key. This should be provided by the LTI Tool. '
+                  'One of either lti_1p3_tool_public_key or lti_1p3_tool_keyset_url must not be blank.'
+    )
+
+    lti_1p3_tool_keyset_url = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text='This is the Tool\'s JWK (JSON Web Key) Keyset (JWKS) URL. This should be provided by the LTI Tool.'
+                  ' One of either lti_1p3_tool_public_key or lti_1p3_tool_keyset_url must not be blank.'
+    )
+
     # Empty variable that'll hold the block once it's retrieved
     # from the modulestore or preloaded
     _block = None
@@ -158,6 +186,14 @@ class LtiConfiguration(models.Model):
         if self.config_store == self.CONFIG_ON_XBLOCK and self.location is None:
             raise ValidationError({
                 "config_store": _("LTI Configuration stores on XBlock needs a block location set."),
+            })
+        if (self.version == self.LTI_1P3 and self.config_store == self.CONFIG_ON_DB and
+                self.lti_1p3_tool_public_key == "" and self.lti_1p3_tool_keyset_url == ""):
+            raise ValidationError({
+                "config_store": _(
+                    "LTI Configuration stored on the model for LTI 1.3 must have a value for one of "
+                    "lti_1p3_tool_public_key or lti_1p3_tool_keyset_url."
+                ),
             })
         try:
             consumer = self.get_lti_consumer()
@@ -333,10 +369,29 @@ class LtiConfiguration(models.Model):
                 consumer.enable_nrps(get_lti_nrps_context_membership_url(self.id))
 
             return consumer
+        elif self.config_store == self.CONFIG_ON_DB:
+            consumer = LtiAdvantageConsumer(
+                iss=get_lms_base(),
+                lti_oidc_url=self.lti_1p3_oidc_url,
+                lti_launch_url=self.lti_1p3_launch_url,
+                client_id=self.lti_1p3_client_id,
+                # Deployment ID hardcoded to 1 since
+                # we're not using multi-tenancy.
+                deployment_id="1",
+                # XBlock Private RSA Key
+                rsa_key=self.lti_1p3_private_key,
+                rsa_key_id=self.lti_1p3_private_key_id,
+                # LTI 1.3 Tool key/keyset url
+                tool_key=self.lti_1p3_tool_public_key,
+                tool_keyset_url=self.lti_1p3_tool_keyset_url,
+            )
 
-        # There's no configuration stored locally, so throw
-        # NotImplemented.
-        raise NotImplementedError
+            return consumer
+
+            # TODO: 1247 - advantage services
+        else:
+            # This should not occur, but raise an error if self.config_store is not CONFIG_ON_XBLOCK or CONFIG_ON_DB.
+            raise NotImplementedError
 
     def get_lti_consumer(self):
         """
